@@ -203,6 +203,18 @@ class Database {
         });
     }
 
+    async getAllUsers() {
+        return new Promise((resolve, reject) => {
+            this.db.all(
+                `SELECT telegram_id FROM users WHERE is_active = 1`,
+                (err, rows) => {
+                    if (err) reject(err);
+                    else resolve(rows);
+                }
+            );
+        });
+    }
+
     close() {
         this.db.close();
     }

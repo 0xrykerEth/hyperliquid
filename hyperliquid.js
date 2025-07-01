@@ -5,6 +5,9 @@ class HyperliquidAPI {
     constructor() {
         this.baseURL = config.HYPERLIQUID_API_URL;
         this.infoEndpoint = `${this.baseURL}/info`;
+        this.metaEndpoint = `${this.baseURL}/meta`;
+        this._cachedMarkets = null;
+        this._lastMarketUpdate = 0;
     }
 
     async getUserFills(user) {
@@ -199,8 +202,90 @@ class HyperliquidAPI {
     }
 
     isValidAddress(address) {
-
         return /^0x[a-fA-F0-9]{40}$/.test(address);
+    }
+
+    async getAllMarkets() {
+        try {
+            const response = await axios.post(this.metaEndpoint, {
+                type: 'meta'
+            });
+            return response.data || { universe: [] };
+        } catch (error) {
+            console.error('Error fetching markets:', error.message);
+            return { universe: [] };
+        }
+    }
+
+    async getNewMarkets() {
+        try {
+            const currentTime = Date.now();
+            const currentMarkets = await this.getAllMarkets();
+            
+            // Initialize cache if needed
+            if (!this._cachedMarkets) {
+                this._cachedMarkets = currentMarkets;
+                this._lastMarketUpdate = currentTime;
+                return { newPerps: [], newSpots: [] };
+            }
+
+            const oldMarkets = this._cachedMarkets;
+            
+            // Find new markets
+            const newPerps = [];
+            const newSpots = [];
+
+            currentMarkets.universe.forEach(market => {
+                const isSpot = market.name.includes('/') || market.name.startsWith('@');
+                const existingMarket = oldMarkets.universe.find(m => m.name === market.name);
+                
+                if (!existingMarket) {
+                    if (isSpot) {
+                        newSpots.push(market);
+                    } else {
+                        newPerps.push(market);
+                    }
+                }
+            });
+
+            // Update cache
+            this._cachedMarkets = currentMarkets;
+            this._lastMarketUpdate = currentTime;
+
+            return { newPerps, newSpots };
+        } catch (error) {
+            console.error('Error checking for new markets:', error.message);
+            return { newPerps: [], newSpots: [] };
+        }
+    }
+
+    formatNewMarketMessage(markets, type = 'perp') {
+        if (!markets || markets.length === 0) return null;
+
+        const icon = type === 'perp' ? '⚡' : '💱';
+        const marketType = type === 'perp' ? 'Perpetual' : 'Spot';
+        
+        let message = `${icon} *New ${marketType} Markets Added!*\n\n`;
+        
+        markets.forEach((market, index) => {
+            message += `${index + 1}. *${market.name}*\n`;
+            if (market.szDecimals) {
+                message += `   • Size Decimals: ${market.szDecimals}\n`;
+            }
+            if (market.tickSize) {
+                message += `   • Tick Size: ${market.tickSize}\n`;
+            }
+            if (market.minSize) {
+                message += `   • Min Size: ${market.minSize}\n`;
+            }
+            if (market.maxLeverage) {
+                message += `   • Max Leverage: ${market.maxLeverage}x\n`;
+            }
+            message += '\n';
+        });
+
+        message += `\n🔗 *Trade now:* [Hyperliquid Exchange](https://app.hyperliquid.xyz/join/0XRYKER)`;
+        return message;
     }
 }
 

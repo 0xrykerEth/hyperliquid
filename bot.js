@@ -11,6 +11,7 @@ const db = new Database();
 const hlAPI = new HyperliquidAPI();
 
 const lastCheckTimes = new Map();
+const activeTwapOrders = new Map();
 
 const commands = [
     { command: 'start', description: 'Start the bot and see welcome message' },
@@ -47,9 +48,14 @@ This bot helps you track orders and trades for specific Hyperliquid wallet addre
 \`/add 0x1234567890abcdef1234567890abcdef12345678 MyWallet\`
 
 ⚡ Start by adding a wallet address to track!
+
+🔗 *Join Hyperliquid:* [Click here to start trading](https://app.hyperliquid.xyz/join/0XRYKER)
         `;
 
-        await bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, welcomeMessage, { 
+            parse_mode: 'Markdown',
+            disable_web_page_preview: true 
+        });
     } catch (error) {
         console.error('Error in start command:', error);
         await bot.sendMessage(chatId, '❌ Error initializing user. Please try again.');
@@ -140,15 +146,11 @@ bot.onText(/\/list/, async (msg) => {
 
 bot.onText(/\/status (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
-    const userId = msg.from.id;
     const walletAddress = match[1].trim();
 
     try {
-        const userWallets = await db.getUserTrackedWallets(userId);
-        const isTracking = userWallets.some(w => w.wallet_address.toLowerCase() === walletAddress.toLowerCase());
-
-        if (!isTracking) {
-            await bot.sendMessage(chatId, '❌ You are not tracking this wallet address.');
+        if (!hlAPI.isValidAddress(walletAddress)) {
+            await bot.sendMessage(chatId, '❌ Invalid wallet address format. Please provide a valid Ethereum address.');
             return;
         }
 
@@ -159,8 +161,10 @@ bot.onText(/\/status (.+)/, async (msg, match) => {
             hlAPI.getUserAssets(walletAddress)
         ]);
 
-        const wallet = userWallets.find(w => w.wallet_address.toLowerCase() === walletAddress.toLowerCase());
-        const displayName = wallet.nickname || `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
+        const userId = msg.from.id;
+        const userWallets = await db.getUserTrackedWallets(userId);
+        const trackedWallet = userWallets.find(w => w.wallet_address.toLowerCase() === walletAddress.toLowerCase());
+        const displayName = trackedWallet?.nickname || `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
 
         let statusMessage = `📊 *Status for ${displayName}*\n\n`;
 
@@ -182,7 +186,8 @@ bot.onText(/\/status (.+)/, async (msg, match) => {
                     const coin = pos.position.coin;
                     const size = pos.position.szi;
                     const pnl = pos.position.unrealizedPnl;
-                    statusMessage += `   • ${coin}: ${size} (PnL: $${pnl})\n`;
+                    const entryPrice = pos.position.entryPx || '0';
+                    statusMessage += `   • ${coin}: ${size} contracts @ $${entryPrice} (PnL: $${pnl})\n`;
                 });
                 if (openPositions.length > 5) {
                     statusMessage += `   ... and ${openPositions.length - 5} more\n`;
@@ -193,6 +198,10 @@ bot.onText(/\/status (.+)/, async (msg, match) => {
         }
 
         statusMessage += `\n🔗 *Address:* \`${walletAddress}\``;
+        
+        if (!trackedWallet) {
+            statusMessage += `\n\n💡 *Tip:* Use \`/add ${walletAddress}\` to track this wallet and receive notifications for new orders.`;
+        }
 
         await bot.sendMessage(chatId, statusMessage, { parse_mode: 'Markdown' });
 
@@ -221,9 +230,13 @@ bot.onText(/\/help/, async (msg) => {
     helpMessage += `*Example Usage:*\n`;
     helpMessage += `\`/add 0x1234...5678 MyTradingWallet\`\n`;
     helpMessage += `\`/status 0x1234...5678\`\n`;
-    helpMessage += `\`/remove 0x1234...5678\``;
+    helpMessage += `\`/remove 0x1234...5678\`\n\n`;
+    helpMessage += `🔗 *Join Hyperliquid:* [Click here to start trading](https://app.hyperliquid.xyz/join/0XRYKER)`;
 
-    await bot.sendMessage(chatId, helpMessage, { parse_mode: 'Markdown' });
+    await bot.sendMessage(chatId, helpMessage, { 
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true 
+    });
 });
 
 async function checkForNewOrders() {
@@ -236,18 +249,26 @@ async function checkForNewOrders() {
                 const recentActivity = await hlAPI.getRecentActivity(walletAddress, lastCheckTime);
                 
                 if (recentActivity.length > 0) {
-
                     const usersTracking = await db.getUsersTrackingWallet(walletAddress);
                     
-                    for (const activity of recentActivity) {
+                    // Group TWAP fills by TWAP ID
+                    const twapFills = new Map();
+                    const nonTwapActivities = [];
 
-                        let activityId;
+                    for (const activity of recentActivity) {
                         if (activity.type === 'twap_fill') {
-                            activityId = `${activity.time}_twap_${activity.twapId}_${activity.oid || activity.tid || Math.random()}`;
+                            if (!twapFills.has(activity.twapId)) {
+                                twapFills.set(activity.twapId, []);
+                            }
+                            twapFills.get(activity.twapId).push(activity);
                         } else {
-                            activityId = `${activity.time}_${activity.oid || activity.tid || Math.random()}`;
+                            nonTwapActivities.push(activity);
                         }
-                        
+                    }
+
+                    // Process non-TWAP activities normally
+                    for (const activity of nonTwapActivities) {
+                        const activityId = `${activity.time}_${activity.oid || activity.tid || Math.random()}`;
                         const alreadyProcessed = await db.isOrderProcessed(walletAddress, activityId);
                         
                         if (!alreadyProcessed) {
@@ -263,6 +284,59 @@ async function checkForNewOrders() {
                             }
                         }
                     }
+
+                    // Process TWAP fills
+                    for (const [twapId, fills] of twapFills) {
+                        // Sort fills by time to process them in order
+                        fills.sort((a, b) => a.time - b.time);
+                        
+                        const firstFill = fills[0];
+                        const walletTwapKey = `${walletAddress}_${twapId}`;
+                        
+                        // Check if this is a new TWAP order
+                        if (!activeTwapOrders.has(walletTwapKey)) {
+                            activeTwapOrders.set(walletTwapKey, {
+                                startTime: firstFill.time,
+                                totalFills: 0,
+                                coin: firstFill.coin,
+                                side: firstFill.side,
+                                initialSize: firstFill.sz
+                            });
+
+                            // Send TWAP start notification
+                            for (const user of usersTracking) {
+                                try {
+                                    const message = formatTwapStartMessage(firstFill, walletAddress, user.nickname, twapId);
+                                    await bot.sendMessage(user.telegram_id, message, { parse_mode: 'Markdown' });
+                                } catch (error) {
+                                    console.error(`Error sending TWAP start message to user ${user.telegram_id}:`, error);
+                                }
+                            }
+                        }
+
+                        // Update TWAP order status
+                        const twapStatus = activeTwapOrders.get(walletTwapKey);
+                        twapStatus.totalFills += fills.length;
+
+                        // Check if TWAP order is complete or cancelled
+                        const lastFill = fills[fills.length - 1];
+                        if (lastFill.isTwapDone || lastFill.isTwapCancelled) {
+                            // Send TWAP completion/cancellation notification
+                            for (const user of usersTracking) {
+                                try {
+                                    const message = lastFill.isTwapCancelled 
+                                        ? formatTwapCancelMessage(lastFill, walletAddress, user.nickname, twapId, twapStatus)
+                                        : formatTwapCompleteMessage(lastFill, walletAddress, user.nickname, twapId, twapStatus);
+                                    await bot.sendMessage(user.telegram_id, message, { parse_mode: 'Markdown' });
+                                } catch (error) {
+                                    console.error(`Error sending TWAP ${lastFill.isTwapCancelled ? 'cancel' : 'complete'} message to user ${user.telegram_id}:`, error);
+                                }
+                            }
+                            
+                            // Remove from active TWAP orders
+                            activeTwapOrders.delete(walletTwapKey);
+                        }
+                    }
                 }
                 
                 lastCheckTimes.set(walletAddress, Date.now());
@@ -276,8 +350,159 @@ async function checkForNewOrders() {
     }
 }
 
+function formatTwapStartMessage(firstFill, walletAddress, nickname, twapId) {
+    const walletName = nickname || `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
+    const timestamp = new Date(firstFill.time).toLocaleString();
+    
+    // Determine if it's spot or perp and long/short
+    const isSpot = firstFill.coin.includes('/') || firstFill.coin.startsWith('@');
+    const isBuy = firstFill.side.toLowerCase() === 'buy';
+    const orderType = isSpot 
+        ? `Spot ${isBuy ? 'Buy' : 'Sell'}` 
+        : (isBuy ? 'Long' : 'Short');
+    const orderEmoji = isSpot 
+        ? (isBuy ? '💵' : '💸')  // 💵 for buy, 💸 for sell in spot
+        : (isBuy ? '📈' : '📉'); // 📈 for long, 📉 for short in perp
+    
+    let message = `🔄 *${orderType} TWAP Order Started*\n\n`;
+    message += `${orderEmoji} *Type:* ${orderType} ${isSpot ? 'Market' : 'Perpetual'}\n`;
+    message += `👤 *Wallet:* ${walletName}\n`;
+    message += `📈 *Pair:* ${firstFill.coin}\n`;
+    message += `📊 *Side:* ${firstFill.side.toUpperCase()}\n`;
+    message += `💰 *Total Size:* ${firstFill.sz}\n`;
+    message += `⏰ *Start Time:* ${timestamp}\n`;
+    message += `🆔 *TWAP ID:* ${twapId}\n\n`;
+    message += `🔗 *Address:* \`${walletAddress}\``;
+    
+    return message;
+}
+
+function formatTwapCompleteMessage(lastFill, walletAddress, nickname, twapId, twapStatus) {
+    const walletName = nickname || `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
+    const startTime = new Date(twapStatus.startTime).toLocaleString();
+    const endTime = new Date(lastFill.time).toLocaleString();
+    const duration = Math.round((lastFill.time - twapStatus.startTime) / 1000); // in seconds
+    
+    // Determine if it's spot or perp and long/short
+    const isSpot = lastFill.coin.includes('/') || lastFill.coin.startsWith('@');
+    const isBuy = lastFill.side.toLowerCase() === 'buy';
+    const orderType = isSpot 
+        ? `Spot ${isBuy ? 'Buy' : 'Sell'}` 
+        : (isBuy ? 'Long' : 'Short');
+    const orderEmoji = isSpot 
+        ? (isBuy ? '💵' : '💸')  // 💵 for buy, 💸 for sell in spot
+        : (isBuy ? '📈' : '📉'); // 📈 for long, 📉 for short in perp
+    
+    let message = `✅ *${orderType} TWAP Order Completed*\n\n`;
+    message += `${orderEmoji} *Type:* ${orderType} ${isSpot ? 'Market' : 'Perpetual'}\n`;
+    message += `👤 *Wallet:* ${walletName}\n`;
+    message += `📈 *Pair:* ${lastFill.coin}\n`;
+    message += `📊 *Side:* ${lastFill.side.toUpperCase()}\n`;
+    message += `💰 *Total Size:* ${twapStatus.initialSize}\n`;
+    message += `🔢 *Total Fills:* ${twapStatus.totalFills}\n`;
+    message += `⏰ *Start Time:* ${startTime}\n`;
+    message += `⌛ *End Time:* ${endTime}\n`;
+    message += `⏱️ *Duration:* ${formatDuration(duration)}\n`;
+    if (lastFill.closedPnl) {
+        const pnlValue = parseFloat(lastFill.closedPnl);
+        const pnlEmoji = pnlValue > 0 ? '📈' : '📉';
+        message += `${pnlEmoji} *Final PnL:* $${lastFill.closedPnl}\n`;
+    }
+    message += `🆔 *TWAP ID:* ${twapId}\n\n`;
+    message += `🔗 *Address:* \`${walletAddress}\``;
+    
+    return message;
+}
+
+function formatTwapCancelMessage(lastFill, walletAddress, nickname, twapId, twapStatus) {
+    const walletName = nickname || `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
+    const startTime = new Date(twapStatus.startTime).toLocaleString();
+    const cancelTime = new Date(lastFill.time).toLocaleString();
+    const duration = Math.round((lastFill.time - twapStatus.startTime) / 1000); // in seconds
+    
+    // Determine if it's spot or perp and long/short
+    const isSpot = lastFill.coin.includes('/') || lastFill.coin.startsWith('@');
+    const isBuy = lastFill.side.toLowerCase() === 'buy';
+    const orderType = isSpot 
+        ? `Spot ${isBuy ? 'Buy' : 'Sell'}` 
+        : (isBuy ? 'Long' : 'Short');
+    const orderEmoji = isSpot 
+        ? (isBuy ? '💵' : '💸')  // 💵 for buy, 💸 for sell in spot
+        : (isBuy ? '📈' : '📉'); // 📈 for long, 📉 for short in perp
+    
+    let message = `❌ *${orderType} TWAP Order Cancelled*\n\n`;
+    message += `${orderEmoji} *Type:* ${orderType} ${isSpot ? 'Market' : 'Perpetual'}\n`;
+    message += `👤 *Wallet:* ${walletName}\n`;
+    message += `📈 *Pair:* ${lastFill.coin}\n`;
+    message += `📊 *Side:* ${lastFill.side.toUpperCase()}\n`;
+    message += `💰 *Initial Size:* ${twapStatus.initialSize}\n`;
+    message += `📊 *Filled Amount:* ${lastFill.filledSz || '0'}\n`;
+    message += `🔢 *Fills Before Cancel:* ${twapStatus.totalFills}\n`;
+    message += `⏰ *Start Time:* ${startTime}\n`;
+    message += `⌛ *Cancel Time:* ${cancelTime}\n`;
+    message += `⏱️ *Duration:* ${formatDuration(duration)}\n`;
+    if (lastFill.closedPnl) {
+        const pnlValue = parseFloat(lastFill.closedPnl);
+        const pnlEmoji = pnlValue > 0 ? '📈' : '📉';
+        message += `${pnlEmoji} *PnL:* $${lastFill.closedPnl}\n`;
+    }
+    message += `🆔 *TWAP ID:* ${twapId}\n\n`;
+    message += `🔗 *Address:* \`${walletAddress}\``;
+    
+    return message;
+}
+
+function formatDuration(seconds) {
+    if (seconds < 60) return `${seconds} seconds`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes} minute${minutes > 1 ? 's' : ''}`;
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    return `${hours} hour${hours > 1 ? 's' : ''} ${remainingMinutes} minute${remainingMinutes > 1 ? 's' : ''}`;
+}
+
 const monitoringInterval = `*/${config.POLLING_INTERVAL} * * * * *`;
 cron.schedule(monitoringInterval, checkForNewOrders);
+
+async function checkForNewMarkets() {
+    try {
+        const { newPerps, newSpots } = await hlAPI.getNewMarkets();
+        
+        if (newPerps.length > 0 || newSpots.length > 0) {
+            // Get all users to notify
+            const allUsers = await db.getAllUsers();
+            
+            // Prepare messages
+            const perpMessage = hlAPI.formatNewMarketMessage(newPerps, 'perp');
+            const spotMessage = hlAPI.formatNewMarketMessage(newSpots, 'spot');
+            
+            // Send notifications to all users
+            for (const user of allUsers) {
+                try {
+                    if (perpMessage) {
+                        await bot.sendMessage(user.telegram_id, perpMessage, { 
+                            parse_mode: 'Markdown',
+                            disable_web_page_preview: true 
+                        });
+                    }
+                    if (spotMessage) {
+                        await bot.sendMessage(user.telegram_id, spotMessage, { 
+                            parse_mode: 'Markdown',
+                            disable_web_page_preview: true 
+                        });
+                    }
+                } catch (error) {
+                    console.error(`Error sending new market notification to user ${user.telegram_id}:`, error);
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Error checking for new markets:', error);
+    }
+}
+
+// Add market monitoring cron job (check every 5 minutes)
+cron.schedule('*/5 * * * *', checkForNewMarkets);
 
 bot.on('error', (error) => {
     console.error('Telegram bot error:', error);
@@ -303,4 +528,4 @@ process.on('SIGTERM', () => {
 
 console.log('🚀 Hyperliquid Telegram Bot started successfully!');
 console.log(`📊 Monitoring orders every ${config.POLLING_INTERVAL} seconds`);
-console.log(`👥 Max wallets per user: ${config.MAX_TRACKED_WALLETS_PER_USER}`); 
+console.log(`👥 Max wallets per user: ${config.MAX_TRACKED_WALLETS_PER_USER}`);
