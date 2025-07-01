@@ -1,0 +1,31 @@
+{
+  "name": "hyperliquid-telegram-tracker",
+  "version": "1.0.0",
+  "description": "Telegram bot to track Hyperliquid orders for specific wallet addresses",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "nodemon bot.js"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.64.0",
+    "sqlite3": "^5.1.6",
+    "axios": "^1.6.2",
+    "dotenv": "^16.3.1",
+    "ws": "^8.14.2",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "hyperliquid",
+    "crypto",
+    "trading",
+    "orders"
+  ],
+  "author": "",
+  "license": "MIT"
+} 
