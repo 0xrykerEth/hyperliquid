@@ -12,6 +12,7 @@ const hlAPI = new HyperliquidAPI();
 
 const lastCheckTimes = new Map();
 const activeTwapOrders = new Map();
+const POSITIONS_PER_PAGE = 10;
 
 const commands = [
     { command: 'start', description: 'Start the bot and see welcome message' },
@@ -146,68 +147,135 @@ bot.onText(/\/list/, async (msg) => {
 
 bot.onText(/\/status (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
-    const walletAddress = match[1].trim();
+    const userId = msg.from.id;
+    const input = match[1].trim();
 
     try {
-        if (!hlAPI.isValidAddress(walletAddress)) {
-            await bot.sendMessage(chatId, '❌ Invalid wallet address format. Please provide a valid Ethereum address.');
-            return;
-        }
-
-        await bot.sendMessage(chatId, '🔍 Fetching wallet status...');
-
-        const [recentActivity, assets] = await Promise.all([
-            hlAPI.getRecentActivity(walletAddress, Date.now() - (24 * 60 * 60 * 1000)), // Last 24 hours
-            hlAPI.getUserAssets(walletAddress)
-        ]);
-
-        const userId = msg.from.id;
+        // First try to find wallet by nickname
         const userWallets = await db.getUserTrackedWallets(userId);
-        const trackedWallet = userWallets.find(w => w.wallet_address.toLowerCase() === walletAddress.toLowerCase());
-        const displayName = trackedWallet?.nickname || `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
-
-        let statusMessage = `📊 *Status for ${displayName}*\n\n`;
-
-        if (recentActivity.length > 0) {
-            statusMessage += `📈 *Recent Activity (24h):* ${recentActivity.length} orders/fills\n`;
-            statusMessage += `⏰ *Last Activity:* ${new Date(recentActivity[0].time).toLocaleString()}\n\n`;
-        } else {
-            statusMessage += `📈 *Recent Activity:* No activity in last 24 hours\n\n`;
-        }
-
-        if (assets && assets.assetPositions) {
-            const openPositions = assets.assetPositions.filter(pos => 
-                pos.position && parseFloat(pos.position.szi || 0) !== 0
+        let walletAddress = input;
+        
+        // If input is not a valid address, try to find by nickname
+        if (!hlAPI.isValidAddress(input)) {
+            const walletByNickname = userWallets.find(w => 
+                w.nickname && w.nickname.toLowerCase() === input.toLowerCase()
             );
             
-            if (openPositions.length > 0) {
-                statusMessage += `💼 *Open Positions:* ${openPositions.length}\n`;
-                openPositions.slice(0, 5).forEach(pos => {
-                    const coin = pos.position.coin;
-                    const size = pos.position.szi;
-                    const pnl = pos.position.unrealizedPnl;
-                    const entryPrice = pos.position.entryPx || '0';
-                    statusMessage += `   • ${coin}: ${size} contracts @ $${entryPrice} (PnL: $${pnl})\n`;
+            if (!walletByNickname) {
+                await bot.sendMessage(chatId, '❌ Invalid input. Please provide a valid wallet address or a saved wallet nickname.');
+                return;
+            }
+            
+            walletAddress = walletByNickname.wallet_address;
+        }
+
+        const loadingMessage = await bot.sendMessage(chatId, '🔄 Loading positions...');
+
+        // Fetch assets with timeout and retry
+        const fetchAssetsWithTimeout = async () => {
+            const timeout = 15000; // 15 second timeout
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+            try {
+                const assets = await Promise.race([
+                    hlAPI.getUserAssets(walletAddress),
+                    new Promise((_, reject) => 
+                        setTimeout(() => reject(new Error('Timeout')), timeout)
+                    )
+                ]);
+
+                clearTimeout(timeoutId);
+                return assets;
+            } catch (error) {
+                clearTimeout(timeoutId);
+                throw error;
+            }
+        };
+
+        // Try up to 2 times with different timeouts
+        let assets;
+        let attempt = 0;
+        let success = false;
+
+        while (attempt < 2 && !success) {
+            try {
+                attempt++;
+                await bot.editMessageText(`🔄 Loading positions${'.'.repeat(attempt)}`, {
+                    chat_id: chatId,
+                    message_id: loadingMessage.message_id
                 });
-                if (openPositions.length > 5) {
-                    statusMessage += `   ... and ${openPositions.length - 5} more\n`;
-                }
-            } else {
-                statusMessage += `💼 *Open Positions:* None\n`;
+
+                assets = await fetchAssetsWithTimeout();
+                success = true;
+            } catch (error) {
+                console.error(`Attempt ${attempt} failed:`, error);
+                if (attempt >= 2) throw error;
+                await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second between attempts
             }
         }
 
-        statusMessage += `\n🔗 *Address:* \`${walletAddress}\``;
-        
-        if (!trackedWallet) {
-            statusMessage += `\n\n💡 *Tip:* Use \`/add ${walletAddress}\` to track this wallet and receive notifications for new orders.`;
+        if (!assets || !assets.assetPositions) {
+            throw new Error('Failed to fetch wallet data');
         }
 
-        await bot.sendMessage(chatId, statusMessage, { parse_mode: 'Markdown' });
+        // Filter only currently open positions with non-zero size
+        const openPositions = assets.assetPositions.filter(pos => {
+            if (!pos.position) return false;
+            
+            const size = parseFloat(pos.position.szi || 0);
+            
+            // Only include positions with non-zero size
+            return size !== 0;
+        });
 
+        const trackedWallet = userWallets.find(w => w.wallet_address.toLowerCase() === walletAddress.toLowerCase());
+        const displayName = trackedWallet?.nickname || `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
+
+        if (openPositions.length > 0) {
+            // Sort positions by absolute PnL value
+            const sortedPositions = openPositions.sort((a, b) => {
+                const aPnl = Math.abs(parseFloat(a.position.unrealizedPnl || 0));
+                const bPnl = Math.abs(parseFloat(b.position.unrealizedPnl || 0));
+                return bPnl - aPnl;
+            });
+
+            let statusMessage = `📊 *${displayName}'s Positions*\n\n`;
+            statusMessage += `💼 *Total Positions:* ${openPositions.length}\n\n`;
+
+            // Add all positions to the message
+            for (const pos of sortedPositions) {
+                const coin = pos.position.coin;
+                const size = pos.position.szi;
+                const pnl = parseFloat(pos.position.unrealizedPnl);
+                const entryPrice = pos.position.entryPx || '0';
+                const direction = parseFloat(size) > 0 ? '📈 Long' : '📉 Short';
+                const pnlEmoji = pnl > 0 ? '🟢' : pnl < 0 ? '🔴' : '⚪';
+
+                statusMessage += `━━━━━━━━━━━━━━━━\n`;
+                statusMessage += `*${direction} ${coin}*\n`;
+                statusMessage += `📊 Size: ${Math.abs(size)} contracts\n`;
+                statusMessage += `💵 Entry: $${Number(entryPrice).toLocaleString()}\n`;
+                statusMessage += `${pnlEmoji} PnL: $${Number(pnl).toLocaleString()}\n\n`;
+            }
+
+            // Add wallet address at the bottom
+            statusMessage += `🔗 \`${walletAddress}\``;
+
+            // Delete loading message and send the combined status
+            await bot.deleteMessage(chatId, loadingMessage.message_id);
+            await bot.sendMessage(chatId, statusMessage, { parse_mode: 'Markdown' });
+        } else {
+            const statusMessage = `📊 *${displayName}'s Positions*\n\n` +
+                `💼 No open positions\n\n` +
+                `🔗 \`${walletAddress}\``;
+            
+            await bot.deleteMessage(chatId, loadingMessage.message_id);
+            await bot.sendMessage(chatId, statusMessage, { parse_mode: 'Markdown' });
+        }
     } catch (error) {
-        console.error('Error fetching status:', error);
-        await bot.sendMessage(chatId, '❌ Error fetching wallet status. Please try again.');
+        console.error('Error in status command:', error);
+        await bot.sendMessage(chatId, '❌ Error fetching positions. Please try again.');
     }
 });
 
@@ -229,7 +297,7 @@ bot.onText(/\/help/, async (msg) => {
     helpMessage += `• Portfolio monitoring\n\n`;
     helpMessage += `*Example Usage:*\n`;
     helpMessage += `\`/add 0x1234...5678 MyTradingWallet\`\n`;
-    helpMessage += `\`/status 0x1234...5678\`\n`;
+    helpMessage += `\`/status 0x1234...5678\`  or  \`/status MyTradingWallet\`\n`;
     helpMessage += `\`/remove 0x1234...5678\`\n\n`;
     helpMessage += `🔗 *Join Hyperliquid:* [Click here to start trading](https://app.hyperliquid.xyz/join/0XRYKER)`;
 
