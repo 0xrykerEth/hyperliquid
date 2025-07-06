@@ -215,6 +215,104 @@ class Database {
         });
     }
 
+    async getUserStatistics() {
+        return new Promise((resolve, reject) => {
+            const stats = {};
+            
+            // Get total user count
+            this.db.get(
+                `SELECT COUNT(*) as total_users FROM users WHERE is_active = 1`,
+                (err, row) => {
+                    if (err) {
+                        reject(err);
+                        return;
+                    }
+                    stats.totalUsers = row.total_users;
+                    
+                    // Get users who joined in last 24 hours
+                    this.db.get(
+                        `SELECT COUNT(*) as new_users FROM users 
+                         WHERE is_active = 1 AND created_at >= datetime('now', '-1 day')`,
+                        (err, row) => {
+                            if (err) {
+                                reject(err);
+                                return;
+                            }
+                            stats.newUsersToday = row.new_users;
+                            
+                            // Get users who joined in last 7 days
+                            this.db.get(
+                                `SELECT COUNT(*) as new_users_week FROM users 
+                                 WHERE is_active = 1 AND created_at >= datetime('now', '-7 days')`,
+                                (err, row) => {
+                                    if (err) {
+                                        reject(err);
+                                        return;
+                                    }
+                                    stats.newUsersThisWeek = row.new_users_week;
+                                    
+                                    // Get total tracked wallets
+                                    this.db.get(
+                                        `SELECT COUNT(*) as total_wallets FROM tracked_wallets WHERE is_active = 1`,
+                                        (err, row) => {
+                                            if (err) {
+                                                reject(err);
+                                                return;
+                                            }
+                                            stats.totalTrackedWallets = row.total_wallets;
+                                            
+                                            // Get unique tracked wallets
+                                            this.db.get(
+                                                `SELECT COUNT(DISTINCT wallet_address) as unique_wallets 
+                                                 FROM tracked_wallets WHERE is_active = 1`,
+                                                (err, row) => {
+                                                    if (err) {
+                                                        reject(err);
+                                                        return;
+                                                    }
+                                                    stats.uniqueTrackedWallets = row.unique_wallets;
+                                                    
+                                                    // Get average wallets per user
+                                                    this.db.get(
+                                                        `SELECT 
+                                                            ROUND(CAST(COUNT(*) AS FLOAT) / COUNT(DISTINCT user_id), 2) as avg_wallets_per_user
+                                                         FROM tracked_wallets WHERE is_active = 1`,
+                                                        (err, row) => {
+                                                            if (err) {
+                                                                reject(err);
+                                                                return;
+                                                            }
+                                                            stats.avgWalletsPerUser = row.avg_wallets_per_user || 0;
+                                                            
+                                                            // Get processed orders count (activity indicator)
+                                                            this.db.get(
+                                                                `SELECT COUNT(*) as total_orders_processed 
+                                                                 FROM processed_orders 
+                                                                 WHERE processed_at >= datetime('now', '-1 day')`,
+                                                                (err, row) => {
+                                                                    if (err) {
+                                                                        reject(err);
+                                                                        return;
+                                                                    }
+                                                                    stats.ordersProcessedToday = row.total_orders_processed;
+                                                                    resolve(stats);
+                                                                }
+                                                            );
+                                                        }
+                                                    );
+                                                }
+                                            );
+                                        }
+                                    );
+                                }
+                            );
+                        }
+                    );
+                }
+            );
+        });
+    }
+
     close() {
         this.db.close();
     }

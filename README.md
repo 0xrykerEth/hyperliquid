@@ -26,7 +26,8 @@ A Telegram bot that tracks Hyperliquid orders for specific wallet addresses with
 - `/add <address> [nickname]` - Add a wallet to track
 - `/remove <address>` - Remove a wallet from tracking
 - `/list` - List all your tracked wallets
-- `/status <address>` - Check status of a specific wallet
+- `/perpStatus <address>` - Check perpetual positions with current prices
+- `/spotStatus <address>` - Check spot balances & HYPE staking with current prices
 - `/help` - Show help message
 
 ## Setup Instructions
@@ -92,7 +93,8 @@ A Telegram bot that tracks Hyperliquid orders for specific wallet addresses with
 
 ### Checking wallet status
 ```
-/status 0x1234567890abcdef1234567890abcdef12345678
+/perpStatus 0x1234567890abcdef1234567890abcdef12345678
+/spotStatus 0x1234567890abcdef1234567890abcdef12345678
 ```
 
 ### Removing a wallet

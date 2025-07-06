@@ -2,6 +2,7 @@ require('dotenv').config();
 
 const config = {
     TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || '',
+    BOT_OWNER_TELEGRAM_ID: process.env.BOT_OWNER_TELEGRAM_ID || null,
     
     DATABASE_PATH: process.env.DATABASE_PATH || './hyperliquid_tracker.db',
     
