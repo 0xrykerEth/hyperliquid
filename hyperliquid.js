@@ -14,6 +14,11 @@ class HyperliquidAPI {
         // Cache for spot metadata
         this._spotMetaCache = null;
         this._spotMetaCacheTime = null;
+        
+        // Cache for perp metadata
+        this._perpMetaCache = null;
+        this._perpMetaCacheTime = null;
+        
         this._CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
     }
 
@@ -133,9 +138,25 @@ class HyperliquidAPI {
         return spotMeta;
     }
 
+    async getCachedPerpMeta() {
+        const now = Date.now();
+        if (this._perpMetaCache && this._perpMetaCacheTime && (now - this._perpMetaCacheTime < this._CACHE_DURATION)) {
+            return this._perpMetaCache;
+        }
+        
+        const perpMeta = await this.getMeta();
+        if (perpMeta) {
+            this._perpMetaCache = perpMeta;
+            this._perpMetaCacheTime = now;
+        }
+        return perpMeta;
+    }
+
     async resolveCoinName(coin) {
+        if (!coin) return 'Unknown';
+        
         // If coin starts with @, it's a spot market ID that needs resolution
-        if (coin && coin.startsWith('@')) {
+        if (coin.startsWith('@')) {
             try {
                 const spotMeta = await this.getCachedSpotMeta();
                 if (spotMeta && spotMeta.universe) {
@@ -146,10 +167,27 @@ class HyperliquidAPI {
                     }
                 }
             } catch (error) {
-                console.error('Error resolving coin name:', error.message);
+                console.error('Error resolving spot coin name:', error.message);
             }
         }
-        return coin; // Return original if not a spot ID or resolution failed
+        
+        // If coin is a number (string), it's likely a perp market ID that needs resolution
+        else if (/^\d+$/.test(coin)) {
+            try {
+                const perpMeta = await this.getCachedPerpMeta();
+                if (perpMeta && perpMeta.universe) {
+                    const perpId = parseInt(coin);
+                    const perpAsset = perpMeta.universe.find(asset => asset.index === perpId);
+                    if (perpAsset) {
+                        return perpAsset.name;
+                    }
+                }
+            } catch (error) {
+                console.error('Error resolving perp coin name:', error.message);
+            }
+        }
+        
+        return coin; // Return original if resolution failed or not a numeric/@ ID
     }
 
     async getAllMids() {
@@ -279,7 +317,7 @@ class HyperliquidAPI {
             status = order.orderStatus;
         }
 
-        const isSpotMarket = coin.includes('/') || coin.startsWith('@');
+        const isSpotMarket = rawCoin.includes('/') || rawCoin.startsWith('@');
         const marketType = isSpotMarket ? 'Spot' : 'Perp';
         
         // Convert side to user-friendly format

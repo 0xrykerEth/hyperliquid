@@ -490,11 +490,12 @@ bot.onText(/\/spotStatus (.+)/i, async (msg, match) => {
                         return bValue - aValue;
                     });
 
-                    significantBalances.forEach(balance => {
+                    for (const balance of significantBalances) {
                         const total = parseFloat(balance.total || 0);
                         const hold = parseFloat(balance.hold || 0);
                         const available = total - hold;
-                        const coin = balance.coin || 'Unknown';
+                        const rawCoin = balance.coin || 'Unknown';
+                        const coin = await hlAPI.resolveCoinName(rawCoin);
                         
                         statusMessage += `• *${coin}:* ${total.toLocaleString()}`;
                         
@@ -521,7 +522,7 @@ bot.onText(/\/spotStatus (.+)/i, async (msg, match) => {
                             statusMessage += `\n    💳 Available: ${available.toLocaleString()}`;
                         }
                         statusMessage += `\n`;
-                    });
+                    }
                     statusMessage += `\n`;
                 } else {
                     statusMessage += `No significant spot balances\n\n`;
@@ -966,11 +967,11 @@ async function formatTwapStartMessage(firstFill, walletAddress, nickname, twapId
     const walletName = nickname || `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
     const timestamp = new Date(firstFill.time).toLocaleString();
     
+    // Determine if it's spot or perp first (before resolving coin name)
+    const isSpot = firstFill.coin.includes('/') || firstFill.coin.startsWith('@');
+    
     // Resolve coin name if it's a spot market ID
     const coin = await hlAPI.resolveCoinName(firstFill.coin);
-    
-    // Determine if it's spot or perp and long/short
-    const isSpot = firstFill.coin.includes('/') || firstFill.coin.startsWith('@');
     const isBuy = firstFill.side.toLowerCase() === 'buy';
     const orderType = isSpot 
         ? `Spot ${isBuy ? 'Buy' : 'Sell'}` 
@@ -998,11 +999,11 @@ async function formatTwapCompleteMessage(lastFill, walletAddress, nickname, twap
     const endTime = new Date(lastFill.time).toLocaleString();
     const duration = Math.round((lastFill.time - twapStatus.startTime) / 1000); // in seconds
     
+    // Determine if it's spot or perp first (before resolving coin name)
+    const isSpot = lastFill.coin.includes('/') || lastFill.coin.startsWith('@');
+    
     // Resolve coin name if it's a spot market ID
     const coin = await hlAPI.resolveCoinName(lastFill.coin);
-    
-    // Determine if it's spot or perp and long/short
-    const isSpot = lastFill.coin.includes('/') || lastFill.coin.startsWith('@');
     const isBuy = lastFill.side.toLowerCase() === 'buy';
     const orderType = isSpot 
         ? `Spot ${isBuy ? 'Buy' : 'Sell'}` 
@@ -1038,11 +1039,11 @@ async function formatTwapCancelMessage(lastFill, walletAddress, nickname, twapId
     const cancelTime = new Date(lastFill.time).toLocaleString();
     const duration = Math.round((lastFill.time - twapStatus.startTime) / 1000); // in seconds
     
+    // Determine if it's spot or perp first (before resolving coin name)
+    const isSpot = lastFill.coin.includes('/') || lastFill.coin.startsWith('@');
+    
     // Resolve coin name if it's a spot market ID
     const coin = await hlAPI.resolveCoinName(lastFill.coin);
-    
-    // Determine if it's spot or perp and long/short
-    const isSpot = lastFill.coin.includes('/') || lastFill.coin.startsWith('@');
     const isBuy = lastFill.side.toLowerCase() === 'buy';
     const orderType = isSpot 
         ? `Spot ${isBuy ? 'Buy' : 'Sell'}` 
