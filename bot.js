@@ -304,7 +304,7 @@ bot.onText(/\/perpStatus (.+)/i, async (msg, match) => {
         let positionsPerPage = 1;
         for (let i = 1; i <= positionsToShow.length; i++) {
             const testPositions = positionsToShow.slice(0, i);
-            const testPositionContent = createPositionMessage(testPositions, allMids);
+            const testPositionContent = await createPositionMessage(testPositions, allMids);
             
             // Build complete test message including potential "Showing X of Y" text
             let fullTestMessage = baseMessage + testPositionContent;
@@ -333,7 +333,7 @@ bot.onText(/\/perpStatus (.+)/i, async (msg, match) => {
         
         // Add as many positions as can fit in message limit
         const finalPositions = positionsToShow.slice(0, positionsPerPage);
-        message += createPositionMessage(finalPositions, allMids);
+        message += await createPositionMessage(finalPositions, allMids);
         
         if (positionsPerPage < positionsToShow.length) {
             message += `\n📝 *Showing ${positionsPerPage} of ${positionsToShow.length} positions*`;
@@ -804,10 +804,11 @@ bot.onText(/\/stats/, async (msg) => {
 });
 
 // Function to create position message display
-function createPositionMessage(positions, allMids) {
+async function createPositionMessage(positions, allMids) {
     let message = '';
     for (const pos of positions) {
-        const coin = pos.position.coin;
+        const rawCoin = pos.position.coin;
+        const coin = await hlAPI.resolveCoinName(rawCoin);
         const size = pos.position.szi;
         const pnl = parseFloat(pos.position.unrealizedPnl);
         const entryPrice = parseFloat(pos.position.entryPx || '0');
@@ -817,8 +818,11 @@ function createPositionMessage(positions, allMids) {
         message += `┌ *${direction} ${coin}*\n`;
         message += `├ Size: ${Math.abs(size)} | Entry: $${entryPrice.toLocaleString()}\n`;
         
-        // Add current price if available
-        const currentPrice = allMids[coin] ? parseFloat(allMids[coin]) : null;
+        // Add current price if available (try both resolved coin name and raw coin name)
+        let currentPrice = allMids[coin] ? parseFloat(allMids[coin]) : null;
+        if (!currentPrice && allMids[rawCoin]) {
+            currentPrice = parseFloat(allMids[rawCoin]);
+        }
         if (currentPrice && entryPrice > 0) {
             const priceChange = ((currentPrice - entryPrice) / entryPrice * 100);
             const changeColor = priceChange >= 0 ? '🟢' : '🔴';
@@ -883,7 +887,7 @@ async function checkForNewOrders() {
                                     if (activity.type === 'staking_activity') {
                                         message = hlAPI.formatStakingMessage(activity, walletAddress, user.nickname);
                                     } else {
-                                        message = hlAPI.formatOrderMessage(activity, walletAddress, user.nickname);
+                                        message = await hlAPI.formatOrderMessage(activity, walletAddress, user.nickname);
                                     }
                                     await bot.sendMessage(user.telegram_id, message, { parse_mode: 'Markdown' });
                                 } catch (error) {
@@ -914,7 +918,7 @@ async function checkForNewOrders() {
                             // Send TWAP start notification
                             for (const user of usersTracking) {
                                 try {
-                                    const message = formatTwapStartMessage(firstFill, walletAddress, user.nickname, twapId);
+                                    const message = await formatTwapStartMessage(firstFill, walletAddress, user.nickname, twapId);
                                     await bot.sendMessage(user.telegram_id, message, { parse_mode: 'Markdown' });
                                 } catch (error) {
                                     console.error(`Error sending TWAP start message to user ${user.telegram_id}:`, error);
@@ -933,8 +937,8 @@ async function checkForNewOrders() {
                             for (const user of usersTracking) {
                                 try {
                                     const message = lastFill.isTwapCancelled 
-                                        ? formatTwapCancelMessage(lastFill, walletAddress, user.nickname, twapId, twapStatus)
-                                        : formatTwapCompleteMessage(lastFill, walletAddress, user.nickname, twapId, twapStatus);
+                                        ? await formatTwapCancelMessage(lastFill, walletAddress, user.nickname, twapId, twapStatus)
+                                        : await formatTwapCompleteMessage(lastFill, walletAddress, user.nickname, twapId, twapStatus);
                                     await bot.sendMessage(user.telegram_id, message, { parse_mode: 'Markdown' });
                                 } catch (error) {
                                     console.error(`Error sending TWAP ${lastFill.isTwapCancelled ? 'cancel' : 'complete'} message to user ${user.telegram_id}:`, error);
@@ -958,9 +962,12 @@ async function checkForNewOrders() {
     }
 }
 
-function formatTwapStartMessage(firstFill, walletAddress, nickname, twapId) {
+async function formatTwapStartMessage(firstFill, walletAddress, nickname, twapId) {
     const walletName = nickname || `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
     const timestamp = new Date(firstFill.time).toLocaleString();
+    
+    // Resolve coin name if it's a spot market ID
+    const coin = await hlAPI.resolveCoinName(firstFill.coin);
     
     // Determine if it's spot or perp and long/short
     const isSpot = firstFill.coin.includes('/') || firstFill.coin.startsWith('@');
@@ -975,7 +982,7 @@ function formatTwapStartMessage(firstFill, walletAddress, nickname, twapId) {
     let message = `🔄 *${orderType} TWAP Order Started*\n\n`;
     message += `${orderEmoji} *Type:* ${orderType} ${isSpot ? 'Market' : 'Perpetual'}\n`;
     message += `👤 *Wallet:* ${walletName}\n`;
-    message += `📈 *Pair:* ${firstFill.coin}\n`;
+    message += `📈 *Pair:* ${coin}\n`;
     message += `📊 *Side:* ${firstFill.side.toUpperCase()}\n`;
     message += `💰 *Total Size:* ${firstFill.sz}\n`;
     message += `⏰ *Start Time:* ${timestamp}\n`;
@@ -985,11 +992,14 @@ function formatTwapStartMessage(firstFill, walletAddress, nickname, twapId) {
     return message;
 }
 
-function formatTwapCompleteMessage(lastFill, walletAddress, nickname, twapId, twapStatus) {
+async function formatTwapCompleteMessage(lastFill, walletAddress, nickname, twapId, twapStatus) {
     const walletName = nickname || `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
     const startTime = new Date(twapStatus.startTime).toLocaleString();
     const endTime = new Date(lastFill.time).toLocaleString();
     const duration = Math.round((lastFill.time - twapStatus.startTime) / 1000); // in seconds
+    
+    // Resolve coin name if it's a spot market ID
+    const coin = await hlAPI.resolveCoinName(lastFill.coin);
     
     // Determine if it's spot or perp and long/short
     const isSpot = lastFill.coin.includes('/') || lastFill.coin.startsWith('@');
@@ -1004,7 +1014,7 @@ function formatTwapCompleteMessage(lastFill, walletAddress, nickname, twapId, tw
     let message = `✅ *${orderType} TWAP Order Completed*\n\n`;
     message += `${orderEmoji} *Type:* ${orderType} ${isSpot ? 'Market' : 'Perpetual'}\n`;
     message += `👤 *Wallet:* ${walletName}\n`;
-    message += `📈 *Pair:* ${lastFill.coin}\n`;
+    message += `📈 *Pair:* ${coin}\n`;
     message += `📊 *Side:* ${lastFill.side.toUpperCase()}\n`;
     message += `💰 *Total Size:* ${twapStatus.initialSize}\n`;
     message += `🔢 *Total Fills:* ${twapStatus.totalFills}\n`;
@@ -1022,11 +1032,14 @@ function formatTwapCompleteMessage(lastFill, walletAddress, nickname, twapId, tw
     return message;
 }
 
-function formatTwapCancelMessage(lastFill, walletAddress, nickname, twapId, twapStatus) {
+async function formatTwapCancelMessage(lastFill, walletAddress, nickname, twapId, twapStatus) {
     const walletName = nickname || `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
     const startTime = new Date(twapStatus.startTime).toLocaleString();
     const cancelTime = new Date(lastFill.time).toLocaleString();
     const duration = Math.round((lastFill.time - twapStatus.startTime) / 1000); // in seconds
+    
+    // Resolve coin name if it's a spot market ID
+    const coin = await hlAPI.resolveCoinName(lastFill.coin);
     
     // Determine if it's spot or perp and long/short
     const isSpot = lastFill.coin.includes('/') || lastFill.coin.startsWith('@');
@@ -1041,7 +1054,7 @@ function formatTwapCancelMessage(lastFill, walletAddress, nickname, twapId, twap
     let message = `❌ *${orderType} TWAP Order Cancelled*\n\n`;
     message += `${orderEmoji} *Type:* ${orderType} ${isSpot ? 'Market' : 'Perpetual'}\n`;
     message += `👤 *Wallet:* ${walletName}\n`;
-    message += `📈 *Pair:* ${lastFill.coin}\n`;
+    message += `📈 *Pair:* ${coin}\n`;
     message += `📊 *Side:* ${lastFill.side.toUpperCase()}\n`;
     message += `💰 *Initial Size:* ${twapStatus.initialSize}\n`;
     message += `📊 *Filled Amount:* ${lastFill.filledSz || '0'}\n`;

@@ -6,8 +6,15 @@ class HyperliquidAPI {
         this.baseURL = config.HYPERLIQUID_API_URL;
         this.infoEndpoint = `${this.baseURL}/info`;
         this.metaEndpoint = `${this.baseURL}/meta`;
+        this.exchangeEndpoint = 'https://api.hyperliquid.xyz/exchange';
+        
         this._cachedMarkets = null;
         this._lastMarketUpdate = 0;
+        
+        // Cache for spot metadata
+        this._spotMetaCache = null;
+        this._spotMetaCacheTime = null;
+        this._CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
     }
 
     async getUserFills(user) {
@@ -110,6 +117,39 @@ class HyperliquidAPI {
             console.error('Error fetching spot meta data:', error.message);
             return null;
         }
+    }
+
+    async getCachedSpotMeta() {
+        const now = Date.now();
+        if (this._spotMetaCache && this._spotMetaCacheTime && (now - this._spotMetaCacheTime < this._CACHE_DURATION)) {
+            return this._spotMetaCache;
+        }
+        
+        const spotMeta = await this.getSpotMeta();
+        if (spotMeta) {
+            this._spotMetaCache = spotMeta;
+            this._spotMetaCacheTime = now;
+        }
+        return spotMeta;
+    }
+
+    async resolveCoinName(coin) {
+        // If coin starts with @, it's a spot market ID that needs resolution
+        if (coin && coin.startsWith('@')) {
+            try {
+                const spotMeta = await this.getCachedSpotMeta();
+                if (spotMeta && spotMeta.universe) {
+                    const spotId = parseInt(coin.substring(1)); // Remove @ and convert to number
+                    const spotAsset = spotMeta.universe.find(asset => asset.index === spotId);
+                    if (spotAsset) {
+                        return spotAsset.name;
+                    }
+                }
+            } catch (error) {
+                console.error('Error resolving coin name:', error.message);
+            }
+        }
+        return coin; // Return original if not a spot ID or resolution failed
     }
 
     async getAllMids() {
@@ -216,12 +256,13 @@ class HyperliquidAPI {
         }
     }
 
-    formatOrderMessage(order, walletAddress, nickname = null) {
+    async formatOrderMessage(order, walletAddress, nickname = null) {
         const walletName = nickname || `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
         const rawSide = order.side || 'Unknown';
         const size = order.sz || order.size || 'Unknown';
         const price = order.px || order.price || 'Market';
-        const coin = order.coin || 'Unknown';
+        const rawCoin = order.coin || 'Unknown';
+        const coin = await this.resolveCoinName(rawCoin);
         const timestamp = order.time ? new Date(order.time).toLocaleString() : 'Unknown';
         
         let status = 'Unknown';
@@ -276,7 +317,7 @@ class HyperliquidAPI {
         return message;
     }
 
-    formatAssetMessage(assetData, walletAddress, nickname = null) {
+    async formatAssetMessage(assetData, walletAddress, nickname = null) {
         if (!assetData || !assetData.assetPositions) {
             return null;
         }
@@ -290,16 +331,17 @@ class HyperliquidAPI {
             message += '📊 *Positions:* No open positions\n';
         } else {
             message += '📊 *Open Positions:*\n';
-            positions.forEach(pos => {
+            for (const pos of positions) {
                 const size = pos.position?.szi || '0';
-                const coin = pos.position?.coin || 'Unknown';
+                const rawCoin = pos.position?.coin || 'Unknown';
+                const coin = await this.resolveCoinName(rawCoin);
                 const pnl = pos.position?.unrealizedPnl || '0';
                 const entryPrice = pos.position?.entryPx || '0';
                 
                 if (parseFloat(size) !== 0) {
                     message += `   • ${coin}: ${size} (Entry: $${entryPrice}, PnL: $${pnl})\n`;
                 }
-            });
+            }
         }
         
         message += `\n🔗 *Address:* \`${walletAddress}\``;

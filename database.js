@@ -44,6 +44,31 @@ class Database {
                     UNIQUE(wallet_address, order_id)
                 )
             `);
+
+            // HyperEVM wallet tracking tables
+            this.db.run(`
+                CREATE TABLE IF NOT EXISTS tracked_evm_wallets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    wallet_address TEXT NOT NULL,
+                    nickname TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT 1,
+                    FOREIGN KEY (user_id) REFERENCES users (id),
+                    UNIQUE(user_id, wallet_address)
+                )
+            `);
+
+            this.db.run(`
+                CREATE TABLE IF NOT EXISTS processed_evm_transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    wallet_address TEXT NOT NULL,
+                    transaction_hash TEXT NOT NULL,
+                    block_number INTEGER,
+                    processed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(wallet_address, transaction_hash)
+                )
+            `);
         });
     }
 
@@ -308,6 +333,137 @@ class Database {
                             );
                         }
                     );
+                }
+            );
+        });
+    }
+
+    // HyperEVM wallet tracking methods
+    async addTrackedEvmWallet(telegramId, walletAddress, nickname = null) {
+        return new Promise((resolve, reject) => {
+            this.db.get(
+                `SELECT id FROM users WHERE telegram_id = ?`,
+                [telegramId],
+                (err, user) => {
+                    if (err) {
+                        reject(err);
+                        return;
+                    }
+                    if (!user) {
+                        reject(new Error('User not found'));
+                        return;
+                    }
+
+                    this.db.get(
+                        `SELECT COUNT(*) as count FROM tracked_evm_wallets WHERE user_id = ? AND is_active = 1`,
+                        [user.id],
+                        (err, result) => {
+                            if (err) {
+                                reject(err);
+                                return;
+                            }
+
+                            if (result.count >= config.MAX_TRACKED_WALLETS_PER_USER) {
+                                reject(new Error(`Maximum ${config.MAX_TRACKED_WALLETS_PER_USER} EVM wallets allowed per user`));
+                                return;
+                            }
+
+                            this.db.run(
+                                `INSERT OR REPLACE INTO tracked_evm_wallets (user_id, wallet_address, nickname) VALUES (?, ?, ?)`,
+                                [user.id, walletAddress, nickname],
+                                function(err) {
+                                    if (err) reject(err);
+                                    else resolve(this.lastID);
+                                }
+                            );
+                        }
+                    );
+                }
+            );
+        });
+    }
+
+    async removeTrackedEvmWallet(telegramId, walletAddress) {
+        return new Promise((resolve, reject) => {
+            this.db.run(
+                `UPDATE tracked_evm_wallets 
+                 SET is_active = 0 
+                 WHERE user_id = (SELECT id FROM users WHERE telegram_id = ?) 
+                 AND wallet_address = ?`,
+                [telegramId, walletAddress],
+                function(err) {
+                    if (err) reject(err);
+                    else resolve(this.changes > 0);
+                }
+            );
+        });
+    }
+
+    async getUserTrackedEvmWallets(telegramId) {
+        return new Promise((resolve, reject) => {
+            this.db.all(
+                `SELECT tew.wallet_address, tew.nickname, tew.created_at
+                 FROM tracked_evm_wallets tew
+                 JOIN users u ON tew.user_id = u.id
+                 WHERE u.telegram_id = ? AND tew.is_active = 1`,
+                [telegramId],
+                (err, rows) => {
+                    if (err) reject(err);
+                    else resolve(rows);
+                }
+            );
+        });
+    }
+
+    async getAllTrackedEvmWallets() {
+        return new Promise((resolve, reject) => {
+            this.db.all(
+                `SELECT DISTINCT wallet_address FROM tracked_evm_wallets WHERE is_active = 1`,
+                (err, rows) => {
+                    if (err) reject(err);
+                    else resolve(rows.map(row => row.wallet_address));
+                }
+            );
+        });
+    }
+
+    async getUsersTrackingEvmWallet(walletAddress) {
+        return new Promise((resolve, reject) => {
+            this.db.all(
+                `SELECT u.telegram_id, tew.nickname
+                 FROM users u
+                 JOIN tracked_evm_wallets tew ON u.id = tew.user_id
+                 WHERE tew.wallet_address = ? AND tew.is_active = 1 AND u.is_active = 1`,
+                [walletAddress],
+                (err, rows) => {
+                    if (err) reject(err);
+                    else resolve(rows);
+                }
+            );
+        });
+    }
+
+    async markEvmTransactionProcessed(walletAddress, transactionHash, blockNumber = null) {
+        return new Promise((resolve, reject) => {
+            this.db.run(
+                `INSERT OR IGNORE INTO processed_evm_transactions (wallet_address, transaction_hash, block_number) VALUES (?, ?, ?)`,
+                [walletAddress, transactionHash, blockNumber],
+                function(err) {
+                    if (err) reject(err);
+                    else resolve(this.lastID);
+                }
+            );
+        });
+    }
+
+    async isEvmTransactionProcessed(walletAddress, transactionHash) {
+        return new Promise((resolve, reject) => {
+            this.db.get(
+                `SELECT * FROM processed_evm_transactions WHERE wallet_address = ? AND transaction_hash = ?`,
+                [walletAddress, transactionHash],
+                (err, row) => {
+                    if (err) reject(err);
+                    else resolve(!!row);
                 }
             );
         });
