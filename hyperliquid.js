@@ -159,15 +159,29 @@ class HyperliquidAPI {
         if (coin.startsWith('@')) {
             try {
                 const spotMeta = await this.getCachedSpotMeta();
+                console.log(`DEBUG: Resolving spot coin ${coin}, spotMeta exists:`, !!spotMeta);
+                
                 if (spotMeta && spotMeta.universe) {
                     const spotId = parseInt(coin.substring(1)); // Remove @ and convert to number
+                    console.log(`DEBUG: Looking for spot asset with index ${spotId} in ${spotMeta.universe.length} assets`);
+                    
                     const spotAsset = spotMeta.universe.find(asset => asset.index === spotId);
-                    if (spotAsset) {
+                    console.log(`DEBUG: Found spot asset:`, !!spotAsset, spotAsset?.name);
+                    
+                    if (spotAsset && spotAsset.name) {
                         return spotAsset.name;
+                    } else {
+                        console.warn(`Spot asset with index ${spotId} not found or missing name. Available assets:`, 
+                            spotMeta.universe.slice(0, 5).map(a => ({ index: a.index, name: a.name })));
+                        return `Spot Asset #${spotId}`;
                     }
+                } else {
+                    console.error('Spot metadata is missing or has no universe property');
+                    return `Spot Asset ${coin}`;
                 }
             } catch (error) {
                 console.error('Error resolving spot coin name:', error.message);
+                return `Spot Asset ${coin}`;
             }
         }
         
@@ -178,12 +192,19 @@ class HyperliquidAPI {
                 if (perpMeta && perpMeta.universe) {
                     const perpId = parseInt(coin);
                     const perpAsset = perpMeta.universe.find(asset => asset.index === perpId);
-                    if (perpAsset) {
+                    if (perpAsset && perpAsset.name) {
                         return perpAsset.name;
+                    } else {
+                        console.warn(`Perp asset with index ${perpId} not found or missing name`);
+                        return `Perp Asset #${perpId}`;
                     }
+                } else {
+                    console.error('Perp metadata is missing or has no universe property');
+                    return `Perp Asset ${coin}`;
                 }
             } catch (error) {
                 console.error('Error resolving perp coin name:', error.message);
+                return `Perp Asset ${coin}`;
             }
         }
         
