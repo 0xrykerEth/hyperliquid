@@ -159,24 +159,43 @@ class HyperliquidAPI {
         if (coin.startsWith('@')) {
             try {
                 const spotMeta = await this.getCachedSpotMeta();
-                console.log(`DEBUG: Resolving spot coin ${coin}, spotMeta exists:`, !!spotMeta);
                 
-                if (spotMeta && spotMeta.universe) {
+                if (spotMeta && spotMeta.universe && spotMeta.tokens) {
                     const spotId = parseInt(coin.substring(1)); // Remove @ and convert to number
-                    console.log(`DEBUG: Looking for spot asset with index ${spotId} in ${spotMeta.universe.length} assets`);
                     
                     const spotAsset = spotMeta.universe.find(asset => asset.index === spotId);
-                    console.log(`DEBUG: Found spot asset:`, !!spotAsset, spotAsset?.name);
                     
-                    if (spotAsset && spotAsset.name) {
-                        return spotAsset.name;
+                    if (spotAsset) {
+                        // If the asset name doesn't start with @, return it as-is (e.g., "PURR/USDC")
+                        if (!spotAsset.name.startsWith('@')) {
+                            return spotAsset.name;
+                        }
+                        
+                        // If the asset name starts with @, resolve token names from tokens array
+                        if (spotAsset.tokens && spotAsset.tokens.length >= 2) {
+                            const token1Index = spotAsset.tokens[0];
+                            const token2Index = spotAsset.tokens[1];
+                            
+                            const token1 = spotMeta.tokens[token1Index];
+                            const token2 = spotMeta.tokens[token2Index];
+                            
+                            if (token1 && token2 && token1.name && token2.name) {
+                                return `${token1.name}/${token2.name}`;
+                            } else {
+                                console.warn(`Could not resolve tokens for ${coin}. Token1: ${token1?.name}, Token2: ${token2?.name}`);
+                                return `Spot Asset #${spotId}`;
+                            }
+                        } else {
+                            console.warn(`Spot asset ${coin} missing tokens array:`, spotAsset.tokens);
+                            return `Spot Asset #${spotId}`;
+                        }
                     } else {
-                        console.warn(`Spot asset with index ${spotId} not found or missing name. Available assets:`, 
+                        console.warn(`Spot asset with index ${spotId} not found. Available assets:`, 
                             spotMeta.universe.slice(0, 5).map(a => ({ index: a.index, name: a.name })));
                         return `Spot Asset #${spotId}`;
                     }
                 } else {
-                    console.error('Spot metadata is missing or has no universe property');
+                    console.error('Spot metadata is missing universe, tokens, or both properties');
                     return `Spot Asset ${coin}`;
                 }
             } catch (error) {
